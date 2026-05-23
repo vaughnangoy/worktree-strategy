@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# prune-merged-worktrees
+#
+# Removes git worktrees whose feature branch has been PR-merged on origin.
+# Leaves unmerged, dirty, PR-open, or PR-closed-without-merge worktrees
+# completely untouched.
+#
+# Repo-agnostic: pass the main worktree path as $1, or run from inside any
+# worktree (the script auto-detects via `git rev-parse --show-toplevel`).
+#
+# Safety guarantees:
+#   - Never uses `git worktree remove --force`.
+#   - Never uses `git branch -D` on a branch that is not confirmed merged
+#     via PR (gh) or already an ancestor of origin/<default-branch>.
+#   - Skips worktrees with uncommitted, staged, or untracked changes.
+#   - Skips worktrees with unpushed commits.
+#
+# Requires: git. Optional: gh (GitHub CLI) — used for squash-merge detection.
+# Without gh, falls back to `git merge-base --is-ancestor` (catches ff-merges
+# only).
+
+set -euo pipefail
+
+REPO_ROOT="${1:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+if [ -z "${REPO_ROOT}" ]; then
+  echo "error: not inside a git repo and no main-worktree path given" >&2
+  echo "usage: prune-merged-worktrees [REPO_ROOT]" >&2
+  exit 1
+fi
+if [ ! -e "${REPO_ROOT}/.git" ]; then
+  echo "error: ${REPO_ROOT} is not a git repository" >&2
+  exit 1
+fi
+cd "${REPO_ROOT}"
+
+git fetch --prune origin >/dev/null
+
+# Default branch (main or master), auto-detected from origin/HEAD.
+DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)"
+if [ -z "${DEFAULT_BRANCH}" ]; then
+  DEFAULT_BRANCH="main"
+fi
+
+git worktree list --porcelain | awk '/^worktree /{print $2}' | while read -r wt; do
+  # Skip the main worktree itself.
+  [ "${wt}" = "${REPO_ROOT}" ] && continue
+
+  branch="$(git -C "${wt}" symbolic-ref --short HEAD 2>/dev/null || true)"
+  [ -z "${branch}" ] && continue
+  [ "${branch}" = "${DEFAULT_BRANCH}" ] && continue
+
+  # Skip dirty trees (uncommitted, staged, or untracked).
+  if ! git -C "${wt}" diff --quiet \
+     || ! git -C "${wt}" diff --cached --quiet \
+     || [ -n "$(git -C "${wt}" ls-files --others --exclude-standard)" ]; then
+    echo "keep  (dirty)              ${wt}  [${branch}]"
+    continue
+  fi
+
+  # Skip if there are unpushed commits.
+  upstream="$(git -C "${wt}" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [ -z "${upstream}" ]; then
+    echo "keep  (no upstream)        ${wt}  [${branch}]"
+    continue
+  fi
+  if [ -n "$(git -C "${wt}" log '@{u}..HEAD' 2>/dev/null)" ]; then
+    echo "keep  (unpushed commits)   ${wt}  [${branch}]"
+    continue
+  fi
+
+  # Determine PR state via gh; fall back gracefully if gh is unavailable.
+  pr_state="NONE"
+  if command -v gh >/dev/null 2>&1; then
+    pr_state="$(gh pr view "${branch}" --json state -q .state 2>/dev/null || echo "NONE")"
+  fi
+
+  case "${pr_state}" in
+    MERGED)
+      echo "prune (PR merged)          ${wt}  [${branch}]"
+      git worktree remove "${wt}"
+      git branch -D "${branch}"
+      git push origin --delete "${branch}" 2>/dev/null || true
+      ;;
+    OPEN)
+      echo "keep  (PR open)            ${wt}  [${branch}]"
+      ;;
+    CLOSED)
+      echo "keep  (PR closed, no merge) ${wt}  [${branch}]  ← review manually"
+      ;;
+    NONE|*)
+      # No PR found (or gh unavailable). Use ancestor check as conservative fallback.
+      if git merge-base --is-ancestor "${branch}" "origin/${DEFAULT_BRANCH}" 2>/dev/null; then
+        echo "prune (in ${DEFAULT_BRANCH})         ${wt}  [${branch}]"
+        git worktree remove "${wt}"
+        git branch -d "${branch}"   # safe: -d refuses if unmerged
+      else
+        echo "keep  (no PR, divergent)   ${wt}  [${branch}]"
+      fi
+      ;;
+  esac
+done
+
+git worktree prune
