@@ -41,6 +41,25 @@ if [ -z "${DEFAULT_BRANCH}" ]; then
   DEFAULT_BRANCH="main"
 fi
 
+# Fast-forward the local default branch to origin/<default>.
+# Uses --ff-only so it never rewrites history and refuses on divergence or
+# a dirty working tree. Works whether the default branch is checked out
+# in a worktree or not.
+DEFAULT_BRANCH_WT="$(git worktree list --porcelain | awk -v b="refs/heads/${DEFAULT_BRANCH}" '
+  /^worktree /{wt=$2} $1=="branch" && $2==b {print wt; exit}')"
+if [ -n "${DEFAULT_BRANCH_WT}" ]; then
+  if git -C "${DEFAULT_BRANCH_WT}" merge --ff-only "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1; then
+    echo "synced ${DEFAULT_BRANCH} → origin/${DEFAULT_BRANCH}  ${DEFAULT_BRANCH_WT}"
+  else
+    echo "keep  (${DEFAULT_BRANCH} dirty or diverged)  ${DEFAULT_BRANCH_WT}"
+  fi
+else
+  # Default branch not checked out anywhere — safe to update the ref directly.
+  if git fetch origin "${DEFAULT_BRANCH}:${DEFAULT_BRANCH}" >/dev/null 2>&1; then
+    echo "synced ${DEFAULT_BRANCH} → origin/${DEFAULT_BRANCH}  (no worktree)"
+  fi
+fi
+
 git worktree list --porcelain | awk '/^worktree /{print $2}' | while read -r wt; do
   # Skip the main worktree itself.
   [ "${wt}" = "${REPO_ROOT}" ] && continue
