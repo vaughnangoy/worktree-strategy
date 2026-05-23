@@ -124,7 +124,7 @@ git worktree prune
 # Summary: list all worktrees still attached to this repo after the run.
 # Flags any 'prunable' entries (admin metadata left over from a deleted dir).
 echo
-echo "remaining worktrees:"
+echo "Worktrees still attached to ${REPO_ROOT}:"
 git worktree list --porcelain | awk '
   /^worktree /{wt=$2; br=""; prunable=""}
   /^branch /  {br=$2; sub(/^refs\/heads\//,"",br)}
